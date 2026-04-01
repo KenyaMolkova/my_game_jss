@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>My Game - Browser Edition</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            background: #0a0f1e;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Courier New', monospace;
+        }
+
+        .game-container {
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            cursor: pointer;
+        }
+
+        .controls-info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            padding: 5px 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-family: monospace;
+            pointer-events: none;
+            backdrop-filter: blur(4px);
+            z-index: 10;
+        }
+
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-family: monospace;
+            font-size: 14px;
+            z-index: 20;
+            backdrop-filter: blur(4px);
+        }
+
+        @media (max-width: 700px) {
+            .controls-info {
+                font-size: 8px;
+                bottom: 5px;
+                left: 5px;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="game-container">
+    <canvas id="gameCanvas"></canvas>
+    <div class="controls-info">
+        ◀ ▶ - движение | ▲ - прыжок | X - рывок (dash)
+    </div>
+    <div id="loadingOverlay" class="loading-overlay">
+        <div>Загрузка спрайтов... <span id="loadingStatus">0%</span></div>
+    </div>
+</div>
+
+<script>
+    (function(){
+        // ---------- НАСТРОЙКИ ----------
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const loadingStatus = document.getElementById('loadingStatus');
+        
+        // Размер виртуального экрана
+        const VIRTUAL_W = 320;
+        const VIRTUAL_H = 240;
+        const SCALE = 3;
+        
+        canvas.width = VIRTUAL_W * SCALE;
+        canvas.height = VIRTUAL_H * SCALE;
+        ctx.imageSmoothingEnabled = false;
+        
+        // Глобальные переменные
+        let gameRunning = true;
+        let assetsLoaded = false;
+        let gameInstance = null;
+        
+        // Управление
+        const keys = {
+            ArrowLeft: false,
+            ArrowRight: false,
+            ArrowUp: false,
+            KeyX: false
+        };
+        
+        // ---------- СИСТЕМА ЗАГРУЗКИ СПРАЙТОВ ----------
+        const SPRITE_PATHS = {
+            // Игрок
+            'player/idle': 'entities/player/idle/',
+            'player/run': 'entities/player/run/',
+            'player/jump': 'entities/player/jump/',
+            
+            // Враг
+            'enemy/idle': 'entities/enemy/idle/',
+            'enemy/run': 'entities/enemy/run/',
+            
+            // Оружие и эффекты
+            'gun': 'gun.png',
+            'projectile': 'projectile.png',
+            'particle/particle': 'particles/particle/',
+            
+            // Фон и облака
+            'background': 'background.png',
+            'cloud1': 'clouds/cloud_1.png',
+            'cloud2': 'clouds/cloud_2.png',
+            
+            // Тайлы (блоки)
+            'decor': 'tiles/decor/',
+            'grass': 'tiles/grass/',
+            'large_decor': 'tiles/large_decor/',
+            'stone': 'tiles/stone/',
+            'castle': 'tiles/castle/',
+            'sand': 'tiles/sand/',
+            'level_transition': 'tiles/level_transition/'
+        };
+        
+        // Хранилище загруженных спрайтов
+        const assets = {
+            images: {},
+            animations: {},
+            clouds: []
+        };
+        
+        // Функция для удаления черного фона (делает черный цвет прозрачным)
+        function makeBlackTransparent(imageData, threshold = 30) {
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i] < threshold && data[i+1] < threshold && data[i+2] < threshold) {
+                    data[i+3] = 0;
+                }
+            }
+            return imageData;
+        }
+        
+        // Загрузка одного изображения
+        function loadImage(path, makeTransparent = true) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    if (makeTransparent) {
+                        const tempCanvas = document.createElement('canvas');
+                        tempCanvas.width = img.width;
+                        tempCanvas.height = img.height;
+                        const tempCtx = tempCanvas.getContext('2d');
+                        tempCtx.drawImage(img, 0, 0);
+                        let imageData = tempCtx.getImageData(0, 0, img.width, img.height);
+                        imageData = makeBlackTransparent(imageData);
+                        tempCtx.putImageData(imageData, 0, 0);
+                        
+                        const processedImg = new Image();
+                        processedImg.onload = () => resolve(processedImg);
+                        processedImg.src = tempCanvas.toDataURL();
+                    } else {
+                        resolve(img);
+                    }
+                };
+                img.onerror = () => {
+                    console.warn(`Не удалось загрузить: ${path}`);
+                    resolve(createPlaceholder());
+                };
+                img.src = path;
+            });
+        }
+        
+        // Создание заглушки
+        function createPlaceholder() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 16;
+            canvas.height = 16;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#40467a';
+            ctx.fillRect(0, 0, 16, 16);
+            ctx.fillStyle = '#fab3f2';
+            ctx.fillRect(4, 4, 8, 8);
+            const img = new Image();
+            img.src = canvas.toDataURL();
+            return img;
+        }
+        
+        // Загрузка последовательности изображений
+        async function loadAnimationSequence(basePath, frameCount, makeTransparent = true) {
+            const images = [];
+            for (let i = 0; i < frameCount; i++) {
+                const frameNum = String(i).padStart(2, '0');
+                const img = await loadImage(`${basePath}${frameNum}.png`, makeTransparent);
+                images.push(img);
+            }
+            return images;
+        }
+        
+        // Главная функция загрузки
+        async function loadAllAssets() {
+            let totalItems = 0;
+            let loadedItems = 0;
+            const itemsToLoad = [];
+            
+            // Определяем элементы для загрузки
+            for (const [key, path] of Object.entries(SPRITE_PATHS)) {
+                if (key === 'gun' || key === 'projectile' || key === 'background' || key === 'cloud1' || key === 'cloud2') {
+                    itemsToLoad.push({ type: 'image', key, path });
+                } else if (key === 'particle/particle') {
+                    itemsToLoad.push({ type: 'sequence', key, path, frames: 7 });
+                } else if (key.startsWith('player/') || key.startsWith('enemy/')) {
+                    itemsToLoad.push({ type: 'sequence', key, path, frames: 7 });
+                } else if (key === 'decor' || key === 'grass' || key === 'large_decor' || 
+                           key === 'stone' || key === 'castle' || key === 'sand' || 
+                           key === 'level_transition') {
+                    itemsToLoad.push({ type: 'sequence', key, path, frames: 7 });
+                }
+            }
+            
+            totalItems = itemsToLoad.length;
+            
+            for (const item of itemsToLoad) {
+                try {
+                    if (item.type === 'image') {
+                        const img = await loadImage(item.path, true);
+                        assets.images[item.key] = img;
+                    } else if (item.type === 'sequence') {
+                        const images = await loadAnimationSequence(item.path, item.frames, true);
+                        assets.animations[item.key] = images;
+                    }
+                    loadedItems++;
+                    const percent = Math.floor((loadedItems / totalItems) * 100);
+                    loadingStatus.textContent = `${percent}% (${loadedItems}/${totalItems})`;
+                } catch (error) {
+                    console.error(`Ошибка загрузки ${item.key}:`, error);
+                    loadedItems++;
+                }
+            }
+            
+            // Собираем облака в массив
+            if (assets.images['cloud1']) assets.clouds.push(assets.images['cloud1']);
+            if (assets.images['cloud2']) assets.clouds.push(assets.images['cloud2']);
+            if (assets.clouds.length === 0) {
+                // Заглушки для облаков
+                assets.clouds.push(createPlaceholder(), createPlaceholder());
+            }
+            
+            // Создаем объекты анимации
+            assets.playerAnimations = {
+                idle: assets.animations['player/idle'] || [createPlaceholder()],
+                run: assets.animations['player/run'] || [createPlaceholder()],
+                jump: assets.animations['player/jump'] || [createPlaceholder()]
+            };
+            
+            assets.enemyAnimations = {
+                idle: assets.animations['enemy/idle'] || [createPlaceholder()],
+                run: assets.animations['enemy/run'] || [createPlaceholder()]
+            };
+            
+            assets.gun = assets.images['gun'] || createPlaceholder();
+            assets.projectile = assets.images['projectile'] || createPlaceholder();
+            assets.background = assets.images['background'] || null;
+            assets.particle = assets.animations['particle/particle'] || [];
+            
+            // Тайлы
+            assets.tiles = {};
+            const tileTypes = ['decor', 'grass', 'large_decor', 'stone', 'castle', 'sand', 'level_transition'];
+            for (const type of tileTypes) {
+                assets.tiles[type] = assets.animations[type] || [createPlaceholder()];
+            }
+            
+            loadingOverlay.style.display = 'none';
+            assetsLoaded = true;
+        }
+        
+        // Функции отрисовки
+        function drawPlayerWithSprites(ctx, x, y, flip, action, frame) {
+            let animationFrames = assets.playerAnimations[action] || assets.playerAnimations.idle;
+            
+            // Убедимся, что animationFrames - это массив и он не пустой
+            if (!animationFrames || animationFrames.length === 0) {
+                console.warn(`No frames for action: ${action}`);
+                animationFrames = assets.playerAnimations.idle || [createPlaceholder()];
+            }
+            
+            // Вычисляем индекс кадра
+            let frameSpeed = 6; // Скорость анимации
+            let imgIndex = Math.floor(frame / frameSpeed) % animationFrames.length;
+            let img = animationFrames[imgIndex];
+            
+            // Отрисовка
+            if (flip) {
+                ctx.save();
+                // Переносимся в центр спрайта
+                ctx.translate(x + 8, y + 8);
+                // Отражаем по горизонтали
+                ctx.scale(-1, 1);
+                // Рисуем, центрируя изображение
+                ctx.drawImage(img, -8, -8, 16, 16);
+                ctx.restore();
+            } else {
+                ctx.drawImage(img, x, y, 16, 16);
+            }
+        }
+        
+        function drawEnemyWithSprites(ctx, x, y, flip, action, frame, gunVisible) {
+            let animationFrames = assets.enemyAnimations[action] || assets.enemyAnimations.idle;
+            let imgIndex = Math.floor(frame / 6) % animationFrames.length;
+            let img = animationFrames[imgIndex];
+            
+            if (flip) {
+                ctx.save();
+                ctx.translate(x + 8, y + 8);
+                ctx.scale(-1, 1);
+                ctx.translate(-8, -8);
+                ctx.drawImage(img, 0, 0, 16, 16);
+                ctx.restore();
+            } else {
+                ctx.drawImage(img, x, y, 16, 16);
+            }
+            
+            if (gunVisible && assets.gun) {
+                if (flip) {
+                    ctx.drawImage(assets.gun, x - 8, y + 6, 8, 4);
+                } else {
+                    ctx.drawImage(assets.gun, x + 16, y + 6, 8, 4);
+                }
+            }
+        }
+        
+        function drawTileWithSprite(ctx, x, y, type, variant) {
+            const tiles = assets.tiles[type];
+            if (tiles && tiles[variant]) {
+                ctx.drawImage(tiles[variant], x, y, 16, 16);
+            } else if (tiles && tiles[0]) {
+                ctx.drawImage(tiles[0], x, y, 16, 16);
+            } else {
+                ctx.fillStyle = "#999";
+                ctx.fillRect(x, y, 16, 16);
+            }
+        }
+        
+        function drawBackgroundWithSprite(ctx, width, height, scroll) {
+            if (assets.background) {
+                ctx.drawImage(assets.background, 0, 0, width, height);
+            } else {
+                let grad = ctx.createLinearGradient(0, 0, 0, height);
+                grad.addColorStop(0, "#87CEEB");
+                grad.addColorStop(1, "#C0E0FF");
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, width, height);
+            }
+            
+            // Облака
+            if (assets.clouds.length > 0) {
+                for (let i = 0; i < 6; i++) {
+                    let cloudX = (scroll * 0.3 + i * 90) % (width + 150) - 75;
+                    let cloudY = 20 + (i * 25) % 120;
+                    let cloudImg = assets.clouds[i % assets.clouds.length];
+                    ctx.drawImage(cloudImg, cloudX, cloudY, 14, 13);
+                }
+            }
+        }
+        
+        // ---------- ФИЗИЧЕСКИЕ ОБЪЕКТЫ ----------
+        class PhysicsEntity {
+            constructor(x,y,w,h) {
+                this.pos = [x,y];
+                this.size = [w,h];
+                this.vel = [0,0];
+                this.collisions = {up:false, down:false, left:false, right:false};
+                this.flip = false;
+                this.action = 'idle';
+                this.animFrame = 0;
+            }
+            rect() {
+                return {x:this.pos[0], y:this.pos[1], w:this.size[0], h:this.size[1]};
+            }
+            updatePhysics(tilemap, moveX, moveY) {
+                this.collisions = {up:false, down:false, left:false, right:false};
+                
+                // Горизонтальное движение
+                let newX = this.pos[0] + moveX;
+                let rect = {x:newX, y:this.pos[1], w:this.size[0], h:this.size[1]};
+                let tiles = tilemap.getPhysicsRects(rect);
+                for(let t of tiles) {
+                    if(rect.x < t.x+t.w && rect.x+rect.w > t.x && rect.y < t.y+t.h && rect.y+rect.h > t.y) {
+                        if(moveX > 0) { rect.x = t.x - rect.w; this.collisions.right = true; }
+                        if(moveX < 0) { rect.x = t.x + t.w; this.collisions.left = true; }
+                        newX = rect.x;
+                    }
+                }
+                this.pos[0] = newX;
+                
+                // Вертикальное движение
+                let newY = this.pos[1] + moveY;
+                rect = {x:this.pos[0], y:newY, w:this.size[0], h:this.size[1]};
+                tiles = tilemap.getPhysicsRects(rect);
+                for(let t of tiles) {
+                    if(rect.x < t.x+t.w && rect.x+rect.w > t.x && rect.y < t.y+t.h && rect.y+rect.h > t.y) {
+                        if(moveY > 0) { rect.y = t.y - rect.h; this.collisions.down = true; }
+                        if(moveY < 0) { rect.y = t.y + t.h; this.collisions.up = true; }
+                        newY = rect.y;
+                    }
+                }
+                this.pos[1] = newY;
+            }
+        }
+        
+        class Player extends PhysicsEntity {
+            constructor(game,x,y) {
+                super(x,y,16,16);
+                this.game = game;
+                this.airTime = 0;
+                this.jumps = 2; // Двойной прыжок
+                this.dashing = 0;
+                this.frameCounter = 0;
+            }
+            update(tilemap, moveInput) {
+                let move = [moveInput, 0];
+                
+                // Обработка рывка
+                if(this.dashing !== 0) {
+                    move[0] = (this.dashing > 0 ? 3 : -3);
+                    this.vel[0] = move[0];
+                }
+                
+                // Гравитация
+                this.vel[1] = Math.min(8, this.vel[1] + 0.25);
+                
+                let moveX = move[0] + this.vel[0];
+                let moveY = this.vel[1];
+                this.updatePhysics(tilemap, moveX, moveY);
+                
+                // Обновление airTime и прыжков
+                if(this.collisions.down) {
+                    this.airTime = 0;
+                    this.jumps = 2;
+                } else {
+                    this.airTime++;
+                }
+                
+                // Смерть от падения
+                if(this.airTime > 120 && !this.game.dead) {
+                    this.game.die();
+                }
+                
+                // Выбор анимации
+                if(this.airTime > 4) {
+                    this.action = 'jump';
+                } else if(moveInput !== 0) {
+                    this.action = 'run';  // ← Здесь выбирается run
+                } else {
+                    this.action = 'idle';
+                }
+                
+                // Направление
+                if(moveInput !== 0) this.flip = moveInput < 0;
+                
+                // Обработка рывка (уменьшение таймера)
+                if(this.dashing !== 0) {
+                    if(Math.abs(this.dashing) === 60 || Math.abs(this.dashing) === 50) {
+                        for(let i=0;i<6;i++) this.game.addParticle(this.pos[0]+8, this.pos[1]+8);
+                    }
+                    this.dashing += (this.dashing > 0 ? -1 : 1);
+                    
+                    if(Math.abs(this.dashing) > 50) {
+                        this.vel[0] = (this.dashing > 0 ? 4 : -4);
+                    }
+                } else {
+                    // Трение
+                    this.vel[0] *= 0.9;
+                }
+                
+                this.frameCounter++;
+            }
+            
+            jump() {
+                console.log("Jump called, jumps left:", this.jumps, "airTime:", this.airTime);
+                if(this.jumps > 0) {
+                    this.vel[1] = -4.2;
+                    this.jumps--;
+                    this.airTime = 5;
+                    this.game.playSfx('jump');
+                    return true;
+                }
+                return false;
+            }
+            
+            dash() {
+                console.log("Dash called, current dash:", this.dashing);
+                if(this.dashing === 0) {
+                    this.dashing = this.flip ? -45 : 45;
+                    this.game.playSfx('dash');
+                    return true;
+                }
+                return false;
+            }
+            
+            render(ctx, camX, camY) {
+                if(Math.abs(this.dashing) <= 50) {
+                    drawPlayerWithSprites(ctx, this.pos[0]-camX, this.pos[1]-camY, this.flip, this.action, this.frameCounter);
+                } else {
+                    // Во время рывка тоже рисуем
+                    drawPlayerWithSprites(ctx, this.pos[0]-camX, this.pos[1]-camY, this.flip, 'run', this.frameCounter);
+                }
+            }
+        }
+        
+        class Enemy extends PhysicsEntity {
+            constructor(game,x,y) {
+                super(x,y,16,16);
+                this.game = game;
+                this.walking = 0;
+                this.shootCooldown = 0;
+                this.frameCounter = 0;
+            }
+            update(tilemap) {
+                let move = [0,0];
+                
+                if(this.walking > 0) {
+                    let dir = this.flip ? -0.8 : 0.8;
+                    let frontX = this.pos[0] + (this.flip ? -4 : 20);
+                    let frontY = this.pos[1] + 20;
+                    let tileSolid = tilemap.isSolidPoint(frontX, frontY);
+                    if(!tileSolid && !this.collisions.right && !this.collisions.left) {
+                        move[0] = dir;
+                    } else {
+                        this.flip = !this.flip;
+                    }
+                    this.walking--;
+                } else {
+                    if(Math.random() < 0.012) {
+                        this.walking = Math.floor(Math.random() * 80 + 40);
+                    }
+                }
+                
+                // Стрельба
+                if(this.walking === 0 && this.shootCooldown <= 0 && this.game.player) {
+                    let dx = this.game.player.pos[0] - this.pos[0];
+                    let dy = this.game.player.pos[1] - this.pos[1];
+                    if(Math.abs(dy) < 30 && Math.abs(dx) < 150 && Math.abs(dx) > 15) {
+                        let dir = dx > 0 ? 1.8 : -1.8;
+                        this.game.addProjectile(this.pos[0]+8, this.pos[1]+8, dir);
+                        this.shootCooldown = 50;
+                    }
+                }
+                if(this.shootCooldown > 0) this.shootCooldown--;
+                
+                this.vel[1] += 0.25;
+                this.updatePhysics(tilemap, move[0] + this.vel[0], this.vel[1]);
+                if(this.collisions.down) this.vel[1] = 0;
+                
+                if(Math.abs(this.vel[0]) > 0) this.action = 'run';
+                else this.action = 'idle';
+                if(move[0] !== 0) this.flip = move[0] < 0;
+                
+                this.frameCounter++;
+            }
+            render(ctx, camX, camY) {
+                let gunVisible = (this.walking === 0 && this.shootCooldown < 40);
+                drawEnemyWithSprites(ctx, this.pos[0]-camX, this.pos[1]-camY, this.flip, this.action, this.frameCounter, gunVisible);
+            }
+            kill() {
+                for(let i=0;i<12;i++) this.game.addSpark(this.pos[0]+8, this.pos[1]+8);
+                return true;
+            }
+        }
+        
+        // ---------- ТАЙЛМАП ----------
+        class Tilemap {
+            constructor() {
+                this.tileSize = 16;
+                this.tiles = new Map();
+                this.physicsTypes = ['grass','stone','castle','sand','level_transition'];
+            }
+            setTile(x,y,type,variant=0) {
+                this.tiles.set(`${x};${y}`, {type, variant});
+            }
+            getTile(x,y) {
+                return this.tiles.get(`${x};${y}`);
+            }
+            getPhysicsRects(entityRect) {
+                let rects = [];
+                let startX = Math.floor(entityRect.x / 16)-1;
+                let endX = Math.floor((entityRect.x+entityRect.w)/16)+1;
+                let startY = Math.floor(entityRect.y / 16)-1;
+                let endY = Math.floor((entityRect.y+entityRect.h)/16)+1;
+                for(let xx=startX; xx<=endX; xx++) {
+                    for(let yy=startY; yy<=endY; yy++) {
+                        let tile = this.getTile(xx,yy);
+                        if(tile && this.physicsTypes.includes(tile.type)) {
+                            rects.push({x:xx*16, y:yy*16, w:16, h:16});
+                        }
+                    }
+                }
+                return rects;
+            }
+            isSolidPoint(px, py) {
+                let tx = Math.floor(px/16);
+                let ty = Math.floor(py/16);
+                let tile = this.getTile(tx,ty);
+                return tile && this.physicsTypes.includes(tile.type);
+            }
+            checkLevelTransition(playerRect) {
+                for(let [key, tile] of this.tiles.entries()) {
+                    if(tile.type === 'level_transition') {
+                        let [tx,ty] = key.split(';').map(Number);
+                        let tileRect = {x:tx*16, y:ty*16, w:16, h:16};
+                        if(playerRect.x < tileRect.x+tileRect.w && playerRect.x+playerRect.w > tileRect.x &&
+                           playerRect.y < tileRect.y+tileRect.h && playerRect.y+playerRect.h > tileRect.y) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            render(ctx, camX, camY) {
+                let startX = Math.floor(camX/16)-2;
+                let endX = startX + (VIRTUAL_W/16)+4;
+                let startY = Math.floor(camY/16)-2;
+                let endY = startY + (VIRTUAL_H/16)+4;
+                for(let x=startX; x<=endX; x++) {
+                    for(let y=startY; y<=endY; y++) {
+                        let tile = this.getTile(x,y);
+                        if(tile) {
+                            drawTileWithSprite(ctx, x*16 - camX, y*16 - camY, tile.type, tile.variant);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Particle и Spark
+        class Particle {
+            constructor(x,y,vx,vy) {
+                this.pos = [x,y];
+                this.vel = [vx,vy];
+                this.life = 1;
+            }
+            update() {
+                this.pos[0] += this.vel[0];
+                this.pos[1] += this.vel[1];
+                this.life -= 0.05;
+                return this.life <= 0;
+            }
+            render(ctx, camX,camY) {
+                if (assets.particle && assets.particle.length > 0) {
+                    let img = assets.particle[Math.floor(Math.random() * assets.particle.length)];
+                    ctx.drawImage(img, this.pos[0]-camX-4, this.pos[1]-camY-4, 8, 8);
+                } else {
+                    ctx.fillStyle = `rgba(255,200,100,${this.life*0.8})`;
+                    ctx.fillRect(this.pos[0]-camX-2, this.pos[1]-camY-2, 4,4);
+                }
+            }
+        }
+        
+        class Spark {
+            constructor(x,y,angle,speed) {
+                this.pos = [x,y];
+                this.angle = angle;
+                this.speed = speed;
+                this.life = 1;
+            }
+            update() {
+                this.pos[0] += Math.cos(this.angle)*this.speed;
+                this.pos[1] += Math.sin(this.angle)*this.speed;
+                this.speed *= 0.95;
+                this.life -= 0.05;
+                return this.life <= 0;
+            }
+            render(ctx, camX, camY) {
+                ctx.beginPath();
+                let x1 = this.pos[0] + Math.cos(this.angle)*this.speed*4 - camX;
+                let y1 = this.pos[1] + Math.sin(this.angle)*this.speed*4 - camY;
+                let x2 = this.pos[0] + Math.cos(this.angle+1.5)*this.speed*2 - camX;
+                let y2 = this.pos[1] + Math.sin(this.angle+1.5)*this.speed*2 - camY;
+                let x3 = this.pos[0] + Math.cos(this.angle-1.5)*this.speed*2 - camX;
+                let y3 = this.pos[1] + Math.sin(this.angle-1.5)*this.speed*2 - camY;
+                ctx.fillStyle = `rgba(255,180,50,${this.life})`;
+                ctx.beginPath();
+                ctx.moveTo(x1,y1);
+                ctx.lineTo(x2,y2);
+                ctx.lineTo(x3,y3);
+                ctx.fill();
+            }
+        }
+        
+        // Game класс
+        class Game {
+            constructor() {
+                this.tilemap = new Tilemap();
+                this.player = null;
+                this.enemies = [];
+                this.projectiles = [];
+                this.particles = [];
+                this.sparks = [];
+                this.cloudOffset = 0;
+                this.dead = 0;
+                this.transition = -30;
+                this.level = 0;
+                this.screenshake = 0;
+                this.loadLevel(0);
+            }
+            
+            playSfx(name) {
+                console.log("🔊 Sound:", name);
+            }
+            
+            addParticle(x,y) {
+                this.particles.push(new Particle(x,y, (Math.random()-0.5)*2, (Math.random()-0.5)*2));
+            }
+            
+            addSpark(x,y) {
+                let angle = Math.random()*Math.PI*2;
+                this.sparks.push(new Spark(x,y, angle, 1+Math.random()*2));
+            }
+            
+            addProjectile(x,y,vx) {
+                this.projectiles.push({pos:[x,y], vel:vx, timer:0});
+            }
+            
+            die() {
+                if(this.dead === 0) {
+                    this.dead = 1;
+                    this.playSfx('hit');
+                    this.screenshake = 16;
+                    for(let i=0;i<20;i++) this.addSpark(this.player.pos[0]+8, this.player.pos[1]+8);
+                }
+            }
+            
+            loadLevel(id) {
+                this.level = id;
+                this.tilemap = new Tilemap();
+                this.enemies = [];
+                this.projectiles = [];
+                this.particles = [];
+                this.sparks = [];
+                this.dead = 0;
+                this.transition = -30;
+                
+                let groundType = 'grass';
+                let wallType = 'stone';
+                if(id===1) { groundType='stone'; wallType='stone'; }
+                if(id===2) { groundType='castle'; wallType='castle'; }
+                if(id===3) { groundType='sand'; wallType='sand'; }
+                
+                // Земля
+                for(let x=-20; x<40; x++) {
+                    this.tilemap.setTile(x, 12, groundType, 1);
+                }
+                // Стены
+                //for(let y=0; y<15; y++) {
+                //    this.tilemap.setTile(-5, y, wallType, Math.floor(Math.random() * 4));
+                //    this.tilemap.setTile(60, y, wallType, Math.floor(Math.random() * 4));
+                //}
+                // Платформы
+                this.tilemap.setTile(10, 10, groundType, 0);
+                this.tilemap.setTile(11, 10, groundType, 1);
+                this.tilemap.setTile(20, 8, groundType, 2);
+                this.tilemap.setTile(21, 8, groundType, 0);
+                this.tilemap.setTile(-2, 8, groundType, 1);
+                
+                // Спавн игрока
+                this.player = new Player(this, 80, 80);
+                // Поиск позиции на земле
+                for(let x=-5;x<40;x++) {
+                    if(this.tilemap.getTile(x, 12) && this.tilemap.getTile(x, 12).type === groundType) {
+                        this.player.pos = [x*16, 12*16 - 16];
+                        break;
+                    }
+                }
+                
+                // Враги
+                for(let spawn of [[200,100],[280,80],[400,120]]) {
+                    if(Math.random()>0.5) this.enemies.push(new Enemy(this, spawn[0], spawn[1]));
+                }
+                
+                this.scroll = [0,0];
+            }
+            
+            update() {
+                if(this.dead > 0) {
+                    this.dead++;
+                    if(this.dead > 40) {
+                        this.loadLevel(this.level);
+                    }
+                    return;
+                }
+                
+                let move = 0;
+                if(keys.ArrowLeft) move = -1;
+                if(keys.ArrowRight) move = 1;
+                this.player.update(this.tilemap, move);
+                
+                // Враги
+                for(let i=0; i<this.enemies.length; i++) {
+                    let e = this.enemies[i];
+                    e.update(this.tilemap);
+                    
+                    // Столкновение с рывком
+                    if(Math.abs(this.player.dashing) > 40 && 
+                       this.player.rect().x < e.rect().x+e.rect().w && 
+                       this.player.rect().x+this.player.rect().w > e.rect().x &&
+                       this.player.rect().y < e.rect().y+e.rect().h && 
+                       this.player.rect().y+this.player.rect().h > e.rect().y) {
+                        if(e.kill()) this.enemies.splice(i,1);
+                        this.screenshake = 12;
+                        i--;
+                    }
+                }
+                
+                // Снаряды
+                for(let i=0;i<this.projectiles.length;i++) {
+                    let p = this.projectiles[i];
+                    p.pos[0] += p.vel;
+                    p.timer++;
+                    if(this.tilemap.isSolidPoint(p.pos[0], p.pos[1]) || p.timer>300) {
+                        this.projectiles.splice(i,1);
+                        for(let s=0;s<3;s++) this.addSpark(p.pos[0], p.pos[1]);
+                        i--;
+                        continue;
+                    }
+                    if(Math.abs(this.player.dashing) < 50 && 
+                       this.player.rect().x < p.pos[0]+3 && 
+                       this.player.rect().x+16 > p.pos[0]-3 &&
+                       this.player.rect().y < p.pos[1]+3 && 
+                       this.player.rect().y+16 > p.pos[1]-3) {
+                        this.die();
+                        this.projectiles.splice(i,1);
+                        break;
+                    }
+                }
+                
+                // Частицы
+                for(let i=0;i<this.particles.length;i++) {
+                    if(this.particles[i].update()) this.particles.splice(i,1);
+                }
+                for(let i=0;i<this.sparks.length;i++) {
+                    if(this.sparks[i].update()) this.sparks.splice(i,1);
+                }
+                
+                // Камера
+                let targetX = this.player.pos[0] + 8 - VIRTUAL_W/2;
+                let targetY = this.player.pos[1] + 8 - VIRTUAL_H/2;
+                this.scroll[0] += (targetX - this.scroll[0])/8;
+                this.scroll[1] += (targetY - this.scroll[1])/8;
+                
+                // Переход уровня
+                if(this.tilemap.checkLevelTransition(this.player.rect())) {
+                    this.transition++;
+                    if(this.transition > 30) {
+                        this.level = (this.level+1) % 4;
+                        this.loadLevel(this.level);
+                    }
+                } else {
+                    if(this.transition < 0) this.transition = Math.min(0, this.transition+1);
+                    else if(this.transition>0 && !this.dead) this.transition = Math.max(0, this.transition-1);
+                }
+                this.cloudOffset += 0.5;
+            }
+            
+            render() {
+                ctx.clearRect(0,0,canvas.width,canvas.height);
+                let displayCanvas = document.createElement('canvas');
+                displayCanvas.width = VIRTUAL_W;
+                displayCanvas.height = VIRTUAL_H;
+                let dCtx = displayCanvas.getContext('2d');
+                dCtx.imageSmoothingEnabled = false;
+                
+                let shakeX = (Math.random()-0.5)*this.screenshake;
+                let shakeY = (Math.random()-0.5)*this.screenshake;
+                let camX = this.scroll[0] + shakeX;
+                let camY = this.scroll[1] + shakeY;
+                
+                drawBackgroundWithSprite(dCtx, VIRTUAL_W, VIRTUAL_H, this.cloudOffset);
+                this.tilemap.render(dCtx, camX, camY);
+                for(let e of this.enemies) e.render(dCtx, camX, camY);
+                this.player.render(dCtx, camX, camY);
+                
+                for(let p of this.projectiles) {
+                    if (assets.projectile) {
+                        dCtx.drawImage(assets.projectile, p.pos[0]-4-camX, p.pos[1]-4-camY, 8, 8);
+                    } else {
+                        dCtx.fillStyle = "#ffaa44";
+                        dCtx.fillRect(p.pos[0]-2-camX, p.pos[1]-2-camY, 4,4);
+                    }
+                }
+                
+                for(let s of this.sparks) s.render(dCtx, camX, camY);
+                for(let part of this.particles) part.render(dCtx, camX, camY);
+                
+                if(this.transition !== 0) {
+                    dCtx.fillStyle = "rgba(255,255,200,0.8)";
+                    let radius = Math.abs(this.transition)*6;
+                    dCtx.beginPath();
+                    dCtx.arc(VIRTUAL_W/2, VIRTUAL_H/2, radius, 0, Math.PI*2);
+                    dCtx.fill();
+                }
+                
+                if(this.dead > 0 && this.dead < 40) {
+                    dCtx.font = "bold 16px monospace";
+                    dCtx.fillStyle = "red";
+                    dCtx.fillText("GAME OVER", VIRTUAL_W/2-45, VIRTUAL_H/2);
+                }
+                
+                ctx.drawImage(displayCanvas, 0, 0, canvas.width, canvas.height);
+                this.screenshake = Math.max(0, this.screenshake-0.5);
+            }
+        }
+        
+        // ---------- ЗАПУСК ----------
+        async function startGame() {
+            await loadAllAssets();
+            gameInstance = new Game();
+            
+            // Сохраняем глобальную ссылку для управления
+            window.gameInstance = gameInstance;
+            
+            function gameLoop() {
+                if(!gameRunning) return;
+                if(gameInstance) gameInstance.update();
+                if(gameInstance) gameInstance.render();
+                requestAnimationFrame(gameLoop);
+            }
+            
+            gameLoop();
+        }
+        
+        // Управление
+        window.addEventListener('keydown', (e) => {
+            if (!assetsLoaded || !gameInstance) return;
+            let code = e.code;
+            
+            if(code === 'ArrowLeft') keys.ArrowLeft = true;
+            if(code === 'ArrowRight') keys.ArrowRight = true;
+            if(code === 'ArrowUp') {
+                console.log("Jump key pressed");
+                if(gameInstance.player) gameInstance.player.jump();
+            }
+            if(code === 'KeyX') {
+                console.log("Dash key pressed");
+                if(gameInstance.player) gameInstance.player.dash();
+            }
+            e.preventDefault();
+        });
+        
+        window.addEventListener('keyup', (e) => {
+            let code = e.code;
+            if(code === 'ArrowLeft') keys.ArrowLeft = false;
+            if(code === 'ArrowRight') keys.ArrowRight = false;
+        });
+        
+        startGame();
+    })();
+</script>
+</body>
+</html>
